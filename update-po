@@ -1,0 +1,148 @@
+#!/usr/bin/perl
+
+use DBI;
+
+%trans = (
+   "DBI:mysql:toytest//" => [qw(
+      game.name game.shortdesc game.longdesc game.extensions game.contents
+      manufacturer.name author.longdesc manufacturer.longdesc
+      iso639.name
+      author.birthplace
+   )],
+);
+
+$i18ndb = "DBI:mysql:papp//";
+
+sub went {
+   my ($refs, $msgid, $msgstr) = @_;
+   for ($msgid, $msgstr) {
+      s/"/\\"/g;
+      s/\n/\\n/g;
+   }
+
+   print "#$_\n" for @$refs;
+   print "msgid \"$msgid\"\n";
+   print "msgstr \"$msgstr\"\n\n";
+}
+
+$db = DBI->connect(split /\//, $i18ndb) or die $DBI::errstr;
+$st = $db->prepare("select distinct lang from i18n_po"); $st->execute;
+while(my $lang = $st->fetchrow_array) {
+   $|=1; print "WRITE $lang"; $|=0;
+   my $st = $db->prepare("select msgid, msgstr, ok from i18n_pot, i18n_po where nr=potnr and lang=?");
+   $st->execute($lang);
+   open PO, ">po/$lang.po" or die "$!";
+   select PO;
+   while (my ($msgid, $msgstr, $ok) = $st->fetchrow_array) {
+      went [$ok ? "" : ", fuzzy"], $msgid, $msgstr;
+   }
+   select STDOUT;
+   close PO;
+   print "\n";
+}
+
+$msg{""} = "";  # skip empty messages
+
+open FILES, "find . -name '*.papp' -o -name '*.xs' -o -name '*.pm' |" or die "$!";
+$prev = "";
+while(<FILES>) {
+   chomp;
+   print "FILE $_\n";
+   $ARGV = $_;
+   open ARGV, "<", $ARGV;
+   my $file;
+   while(<ARGV>) {
+      while (s/[N_]_\(?"((?:[^"\\]+|\\.)*)"\)?//) {
+         push @{$msg{$1}}, "$ARGV:$. $_";
+      }
+      $file .= $_;
+   }
+   while ($file =~ /[N_]_\(?"((?:[^"\\]+|\\.)*)"\)?/sg) {
+      push @{$msg{$1}}, "$ARGV:(multiline)";
+   }
+   close ARGV;
+}
+
+while (my ($db, $vals) = each %trans) {
+   $xdb = DBI->connect(split "/", $db);
+   for (@$vals) {
+      print "FIELD $db / $_\n";
+      my ($table, $field) = split /\./, $_;
+      my $st = $xdb->prepare("select $field from $table");
+      $st->execute;
+      $st->bind_columns(\my($msgid));
+      while ($st->fetch) {
+         $msgid =~ s/\r|\\r//g;
+         push @{$msg{$msgid}}, "DB:$db:$table:$field";
+      }
+   }
+}
+
+print "GENPOT\n";
+
+open POT, ">po/update.pot" or die "$!";
+#print POT <<'EOF';
+#msgid ""
+#msgstr ""
+#"Project-Id-Version: Apache::PApp\n"
+#"MIME-Version: 1.0\n"
+#"Content-Type: text/plain; charset=iso-8859-1\n"
+#"Content-Transfer-Encoding: 8bit\n"
+#
+#EOF
+
+$db->do("delete from i18n_pot");
+
+select POT;
+my $st = $db->prepare("insert into i18n_pot (msgid, context) values (?, ?)");
+while (my ($msgid, $refs) = each %msg) {
+   went $refs, $msgid, "";
+   $st->execute($msgid, join "\n", sort @$refs);
+   $msg{$msgid} = $st->{mysql_insertid};
+
+}
+select STDOUT;
+
+#for po in po/*.po; do
+#                 msgmerge -e --strict -w 83 $po po/fluffball.pot >$po~ && mv $po~ $po
+#                 done
+
+opendir DIR, "po";
+@lang = grep s/\.po$//, readdir DIR;
+closedir DIR;
+
+$db->do("delete from i18n_po");
+for $lang (@lang) {
+   print "MERGE $lang ";
+   system "msgmerge -w 83 po/$lang.po po/update.pot >$lang~ && mv $lang~ po/$lang.po"
+      and die "msgmerge failed\n";
+}
+
+for $lang (@lang) {
+   print "READ $lang ";
+   local $/ = "\n\n";
+   open PO, "<po/$lang.po" or die "$!";
+   my $st1 = $db->prepare("replace into i18n_po (potnr, lang, ok, msgstr) values (?, ?, ?, ?)");
+   while (<PO>) {
+      next if /^#~ /m;
+      /^(.*\n)?msgid "(.*)"\nmsgstr "(.*)"\n\n?$/s or die "$lang <<<$_>>>";
+      my ($comments, $msgid, $msgstr) = ($1, $2, $3);
+      next if $msgid eq "";
+      for ($msgid, $msgstr) {
+         s/"\n"//g;
+         s/\\"/"/g;
+         s/\\n/\n/g;
+         s/\r|\\r//g;
+      }
+
+      my $fuzzy = $comments =~ /^#,.*fuzzy/m;
+
+      $st1->execute($msg{$msgid}, $lang, 1*(!$fuzzy && $msgstr ne ""),  $msgstr);
+   }
+   close PO;
+   print "\n";
+}
+
+
+
+

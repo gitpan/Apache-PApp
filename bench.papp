@@ -1,0 +1,10 @@
+<database dsn="DBI:mysql:"/>
+<language lang="en" desc="English"/>
+
+<phtml><![CDATA[
+   <html><body>
+   __"This is a test"
+   <?slink "TEST-LINK":>
+   </body></html>
+]]></phtml>
+
